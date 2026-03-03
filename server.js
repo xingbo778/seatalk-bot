@@ -1,15 +1,101 @@
 const http = require('http');
+const https = require('https');
 const url = require('url');
 
 const PORT = process.env.PORT || 8080;
-const APP_ID = process.env.SEATALK_APP_ID || '';
-const APP_SECRET = process.env.SEATALK_APP_SECRET || '';
+const APP_ID = process.env.SEATALK_APP_ID || 'MDc4MjcwNTE2ODY5';
+const APP_SECRET = process.env.SEATALK_APP_SECRET || 'w20BysMOMSiIYnTsrfHH9t3Fw_iMg2wu';
 
 console.log(`SeaTalk Bot starting on port ${PORT}...`);
-console.log(`App ID: ${APP_ID}`);
 
-// 存储对话
+// 存储对话和 access token
 const conversations = new Map();
+let accessToken = null;
+let tokenExpiry = 0;
+
+// 获取 access token
+async function getAccessToken() {
+  if (accessToken && Date.now() < tokenExpiry) {
+    return accessToken;
+  }
+  
+  return new Promise((resolve, reject) => {
+    const data = JSON.stringify({ app_id: APP_ID, app_secret: APP_SECRET });
+    
+    const options = {
+      hostname: 'open.seatalk.io',
+      path: '/authentication/v1/token/get',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': data.length
+      }
+    };
+    
+    const req = https.request(options, (res) => {
+      let body = '';
+      res.on('data', chunk => body += chunk);
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(body);
+          if (json.code === 0 && json.token) {
+            accessToken = json.token;
+            tokenExpiry = Date.now() + (json.expire_in || 7200) * 1000 - 60000;
+            console.log('Got access token');
+            resolve(accessToken);
+          } else {
+            reject(new Error('Failed to get token: ' + body));
+          }
+        } catch (e) {
+          reject(e);
+        }
+      });
+    });
+    
+    req.on('error', reject);
+    req.write(data);
+    req.end();
+  });
+}
+
+// 发送消息
+async function sendMessage(userId, message) {
+  try {
+    const token = await getAccessToken();
+    const data = JSON.stringify({
+      recipient: { type: 'single', id: userId },
+      message: { text: message }
+    });
+    
+    return new Promise((resolve, reject) => {
+      const options = {
+        hostname: 'open.seatalk.io',
+        path: '/messaging/v1/send_message',
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          'Content-Length': data.length
+        }
+      };
+      
+      const req = https.request(options, (res) => {
+        let body = '';
+        res.on('data', chunk => body += chunk);
+        res.on('end', () => {
+          console.log('Send result:', body);
+          resolve(body);
+        });
+      });
+      
+      req.on('error', reject);
+      req.write(data);
+      req.end();
+    });
+  } catch (e) {
+    console.error('Send error:', e);
+  }
+}
 
 const server = http.createServer((req, res) => {
   console.log(`${new Date().toISOString()} ${req.method} ${req.url}`);
@@ -17,91 +103,71 @@ const server = http.createServer((req, res) => {
   try {
     const parsedUrl = url.parse(req.url, true);
     
-    // Health check
     if (parsedUrl.pathname === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok', time: Date.now() }));
-      return;
+      return res.end(JSON.stringify({ status: 'ok', time: Date.now() }));
     }
     
-    // SeaTalk callback
     if (parsedUrl.pathname === '/seatalk/callback') {
-      // GET 验证
       if (req.method === 'GET') {
         const challenge = parsedUrl.query.seatalk_challenge || parsedUrl.query.challenge;
         if (challenge) {
-          console.log(`GET challenge: ${challenge}`);
+          console.log(`Verification: ${challenge}`);
           res.writeHead(200, { 'Content-Type': 'application/json' });
           return res.end(JSON.stringify({ seatalk_challenge: challenge }));
         }
-        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.writeHead(200);
         return res.end(JSON.stringify({ status: 'ok' }));
       }
       
-      // POST 事件处理
       if (req.method === 'POST') {
         let body = '';
         req.on('data', chunk => body += chunk);
         req.on('end', async () => {
-          console.log(`POST body: ${body}`);
+          console.log('Event:', body);
           
           try {
             const data = JSON.parse(body);
-            const eventType = data.event_type;
-            const event = data.event || {};
             
-            // 验证请求
+            // 验证
             if (data.event_type === 'event_verification') {
-              const challenge = event.seatalk_challenge;
-              console.log(`Verification: ${challenge}`);
+              const challenge = data.event?.seatalk_challenge;
               res.writeHead(200, { 'Content-Type': 'application/json' });
               return res.end(JSON.stringify({ seatalk_challenge: challenge }));
             }
             
-            // 处理消息
+            // 消息
             if (data.event_type === 'message_from_bot_subscriber') {
-              const senderId = event.sender?.id;
-              const message = event.message?.text || '';
+              const senderId = data.event?.sender?.id;
+              const message = data.event?.message?.text || '';
+              
               console.log(`Message from ${senderId}: ${message}`);
               
-              // 存储对话
-              if (senderId && !conversations.has(senderId)) {
-                conversations.set(senderId, { messages: [] });
-              }
-              if (senderId) {
-                conversations.get(senderId).messages.push({
-                  role: 'user',
-                  text: message,
-                  time: Date.now()
-                });
+              // 生成回复
+              const reply = generateReply(message);
+              
+              // 发送回复
+              if (senderId && reply) {
+                await sendMessage(senderId, reply);
               }
               
-              // 自动回复
-              const reply = generateReply(message, senderId);
-              console.log(`Reply to ${senderId}: ${reply}`);
-              
-              // TODO: 发送回复到 SeaTalk
-              // 需要调用 SeaTalk API 发送消息
-              
-              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.writeHead(200);
               return res.end(JSON.stringify({ status: 'ok' }));
             }
             
-            // 其他事件
-            console.log(`Event: ${eventType}`);
-            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.writeHead(200);
             res.end(JSON.stringify({ status: 'ok' }));
           } catch (e) {
             console.error('Error:', e);
-            res.writeHead(400);
-            res.end(JSON.stringify({ error: e.message }));
+            res.writeHead(200);
+            res.end(JSON.stringify({ status: 'ok' }));
           }
         });
         return;
       }
     }
     
-    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.writeHead(404);
     res.end('Not found');
   } catch (e) {
     console.error('Error:', e);
@@ -110,23 +176,17 @@ const server = http.createServer((req, res) => {
   }
 });
 
-function generateReply(message, userId) {
-  const lower = message.toLowerCase();
-  
-  if (lower.includes('hello') || lower.includes('hi') || lower.includes('你好')) {
-    return '你好！我是 xbclaw，很高兴认识你！有什么我可以帮助你的吗？';
+function generateReply(message) {
+  const m = message.toLowerCase();
+  if (m.includes('hello') || m.includes('hi') || m.includes('你好')) {
+    return '你好！我是 xbclaw，很高兴认识你！有什么可以帮你的吗？';
   }
-  if (lower.includes('help') || lower.includes('帮助')) {
-    return '我可以帮助你：\n1. 回答问题\n2. 聊天\n3. 执行任务\n请告诉我你需要什么帮助！';
+  if (m.includes('help') || m.includes('帮助')) {
+    return '我可以帮助你聊天、回答问题或执行任务。请告诉我你需要什么！';
   }
-  
-  return `收到你的消息："${message}"\n\n我是 xbclaw，一个正在进化的 AI 助手。我正在学习如何更好地帮助你！`;
+  return `收到: "${message}"\n我是 xbclaw，正在学习如何更好地帮助你！`;
 }
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`SeaTalk Bot listening on port ${PORT}`);
-});
-
-process.on('uncaughtException', (e) => {
-  console.error('Uncaught:', e);
+  console.log(`SeaTalk Bot ready on port ${PORT}`);
 });
