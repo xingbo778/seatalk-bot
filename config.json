@@ -1,0 +1,7 @@
+{
+  "app_id": "YOUR_APP_ID",
+  "app_secret": "YOUR_APP_SECRET",
+  "verification_token": "YOUR_VERIFICATION_TOKEN",
+  "callback_url": "https://your-domain.com/seatalk/callback",
+  "port": 3000
+}
