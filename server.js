@@ -6,7 +6,12 @@ const PORT = process.env.PORT || 8080;
 const APP_ID = process.env.SEATALK_APP_ID || 'MDc4MjcwNTE2ODY5';
 const APP_SECRET = process.env.SEATALK_APP_SECRET || 'w20BysMOMSiIYnTsrfHH9t3Fw_iMg2wu';
 
+// OpenClaw 配置 - 用于转发消息
+const OPENCLAW_ENABLED = process.env.OPENCLAW_ENABLED === 'true';
+const OPENCLAW_WEBHOOK_URL = process.env.OPENCLAW_WEBHOOK_URL || '';
+
 console.log(`SeaTalk Bot starting on port ${PORT}...`);
+console.log(`OpenClaw forwarding: ${OPENCLAW_ENABLED ? 'enabled' : 'disabled'}`);
 
 // 存储对话和 access token
 const conversations = new Map();
@@ -97,6 +102,54 @@ async function sendMessage(userId, message) {
   }
 }
 
+// 转发消息到 OpenClaw
+async function forwardToOpenClaw(senderId, message) {
+  if (!OPENCLAW_ENABLED || !OPENCLAW_WEBHOOK_URL) {
+    return;
+  }
+  
+  try {
+    const data = JSON.stringify({
+      sender_id: senderId,
+      message: message,
+      timestamp: new Date().toISOString(),
+      source: 'seatalk'
+    });
+    
+    return new Promise((resolve, reject) => {
+      const options = {
+        hostname: new URL(OPENCLAW_WEBHOOK_URL).hostname,
+        port: new URL(OPENCLAW_WEBHOOK_URL).port || (new URL(OPENCLAW_WEBHOOK_URL).protocol === 'https:' ? 443 : 80),
+        path: new URL(OPENCLAW_WEBHOOK_URL).pathname,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': data.length
+        }
+      };
+      
+      const req = https.request(options, (res) => {
+        let body = '';
+        res.on('data', chunk => body += chunk);
+        res.on('end', () => {
+          console.log('OpenClaw forward result:', res.statusCode, body);
+          resolve(body);
+        });
+      });
+      
+      req.on('error', (e) => {
+        console.error('OpenClaw forward error:', e);
+        reject(e);
+      });
+      
+      req.write(data);
+      req.end();
+    });
+  } catch (e) {
+    console.error('Forward to OpenClaw error:', e);
+  }
+}
+
 const server = http.createServer((req, res) => {
   console.log(`${new Date().toISOString()} ${req.method} ${req.url}`);
   
@@ -143,6 +196,9 @@ const server = http.createServer((req, res) => {
               
               console.log(`Message from ${senderId}: ${message}`);
               
+              // 转发到 OpenClaw
+              await forwardToOpenClaw(senderId, message);
+              
               // 生成回复
               const reply = generateReply(message);
               
@@ -184,7 +240,7 @@ function generateReply(message) {
   if (m.includes('help') || m.includes('帮助')) {
     return '我可以帮助你聊天、回答问题或执行任务。请告诉我你需要什么！';
   }
-  return `收到: "${message}"\n我是 xbclaw，正在学习如何更好地帮助你！`;
+  return `收到："${message}"\n我是 xbclaw，正在学习如何更好地帮助你！`;
 }
 
 server.listen(PORT, '0.0.0.0', () => {
