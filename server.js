@@ -6,17 +6,19 @@ const PORT = process.env.PORT || 8080;
 const APP_ID = process.env.SEATALK_APP_ID || 'MDc4MjcwNTE2ODY5';
 const APP_SECRET = process.env.SEATALK_APP_SECRET || 'w20BysMOMSiIYnTsrfHH9t3Fw_iMg2wu';
 
-// OpenClaw 配置 - 用于转发消息
-const OPENCLAW_ENABLED = process.env.OPENCLAW_ENABLED === 'true';
-const OPENCLAW_WEBHOOK_URL = process.env.OPENCLAW_WEBHOOK_URL || '';
+// OpenClaw 配置 - 用于消息中转
+const OPENCLAW_API_KEY = process.env.OPENCLAW_API_KEY || '';
 
 console.log(`SeaTalk Bot starting on port ${PORT}...`);
-console.log(`OpenClaw forwarding: ${OPENCLAW_ENABLED ? 'enabled' : 'disabled'}`);
 
 // 存储对话和 access token
 const conversations = new Map();
 let accessToken = null;
 let tokenExpiry = 0;
+
+// 消息队列 - 存储待发送的消息
+const messageQueue = [];
+let lastMessageId = 0;
 
 // 获取 access token
 async function getAccessToken() {
@@ -102,56 +104,18 @@ async function sendMessage(userId, message) {
   }
 }
 
-// 转发消息到 OpenClaw
-async function forwardToOpenClaw(senderId, message) {
-  if (!OPENCLAW_ENABLED || !OPENCLAW_WEBHOOK_URL) {
-    return;
-  }
-  
-  try {
-    const data = JSON.stringify({
-      sender_id: senderId,
-      message: message,
-      timestamp: new Date().toISOString(),
-      source: 'seatalk'
-    });
-    
-    return new Promise((resolve, reject) => {
-      const options = {
-        hostname: new URL(OPENCLAW_WEBHOOK_URL).hostname,
-        port: new URL(OPENCLAW_WEBHOOK_URL).port || (new URL(OPENCLAW_WEBHOOK_URL).protocol === 'https:' ? 443 : 80),
-        path: new URL(OPENCLAW_WEBHOOK_URL).pathname,
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': data.length
-        }
-      };
-      
-      const req = https.request(options, (res) => {
-        let body = '';
-        res.on('data', chunk => body += chunk);
-        res.on('end', () => {
-          console.log('OpenClaw forward result:', res.statusCode, body);
-          resolve(body);
-        });
-      });
-      
-      req.on('error', (e) => {
-        console.error('OpenClaw forward error:', e);
-        reject(e);
-      });
-      
-      req.write(data);
-      req.end();
-    });
-  } catch (e) {
-    console.error('Forward to OpenClaw error:', e);
-  }
-}
-
 const server = http.createServer((req, res) => {
   console.log(`${new Date().toISOString()} ${req.method} ${req.url}`);
+  
+  // 设置 CORS
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    return res.end();
+  }
   
   try {
     const parsedUrl = url.parse(req.url, true);
@@ -161,6 +125,7 @@ const server = http.createServer((req, res) => {
       return res.end(JSON.stringify({ status: 'ok', time: Date.now() }));
     }
     
+    // SeaTalk 回调
     if (parsedUrl.pathname === '/seatalk/callback') {
       if (req.method === 'GET') {
         const challenge = parsedUrl.query.seatalk_challenge || parsedUrl.query.challenge;
@@ -189,26 +154,31 @@ const server = http.createServer((req, res) => {
               return res.end(JSON.stringify({ seatalk_challenge: challenge }));
             }
             
-            // 消息
+            // 消息 - 存储到队列，等待 OpenClaw 来取
             if (data.event_type === 'message_from_bot_subscriber') {
               const senderId = data.event?.sender?.id;
               const message = data.event?.message?.text || '';
               
               console.log(`Message from ${senderId}: ${message}`);
               
-              // 转发到 OpenClaw
-              await forwardToOpenClaw(senderId, message);
+              // 添加到消息队列
+              const messageId = ++lastMessageId;
+              messageQueue.push({
+                id: messageId,
+                sender_id: senderId,
+                message: message,
+                timestamp: Date.now()
+              });
               
-              // 生成回复
-              const reply = generateReply(message);
-              
-              // 发送回复
-              if (senderId && reply) {
-                await sendMessage(senderId, reply);
+              // 只保留最近 100 条消息
+              if (messageQueue.length > 100) {
+                messageQueue.shift();
               }
               
+              console.log(`Message added to queue (id: ${messageId}, queue size: ${messageQueue.length})`);
+              
               res.writeHead(200);
-              return res.end(JSON.stringify({ status: 'ok' }));
+              return res.end(JSON.stringify({ status: 'ok', message_id: messageId }));
             }
             
             res.writeHead(200);
@@ -223,12 +193,89 @@ const server = http.createServer((req, res) => {
       }
     }
     
+    // OpenClaw 轮询 - 获取新消息 (长轮询)
+    if (parsedUrl.pathname === '/poll') {
+      if (req.method === 'GET') {
+        const lastId = parseInt(parsedUrl.query.last_id || '0');
+        const timeout = parseInt(parsedUrl.query.timeout || '5000');
+        
+        console.log(`Poll request: last_id=${lastId}, timeout=${timeout}ms`);
+        
+        // 检查是否有新消息
+        const hasNewMessage = messageQueue.some(m => m.id > lastId);
+        
+        if (hasNewMessage) {
+          // 立即返回新消息
+          const newMessages = messageQueue.filter(m => m.id > lastId);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ messages: newMessages }));
+        }
+        
+        // 没有新消息，等待（长轮询）
+        const checkInterval = 200; // 每 200ms 检查一次
+        let elapsed = 0;
+        
+        const checkNewMessage = () => {
+          const hasNew = messageQueue.some(m => m.id > lastId);
+          if (hasNew) {
+            const newMessages = messageQueue.filter(m => m.id > lastId);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ messages: newMessages }));
+          }
+          
+          elapsed += checkInterval;
+          if (elapsed >= timeout) {
+            // 超时，返回空
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ messages: [] }));
+          }
+          
+          setTimeout(checkNewMessage, checkInterval);
+        };
+        
+        checkNewMessage();
+        return;
+      }
+    }
+    
+    // OpenClaw 发送回复
+    if (parsedUrl.pathname === '/send') {
+      if (req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', async () => {
+          try {
+            const data = JSON.parse(body);
+            const { user_id, message } = data;
+            
+            if (!user_id || !message) {
+              res.writeHead(400);
+              return res.end(JSON.stringify({ error: 'user_id and message required' }));
+            }
+            
+            console.log(`Sending reply to ${user_id}: ${message}`);
+            
+            // 通过 SeaTalk API 发送
+            const result = await sendMessage(user_id, message);
+            
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ status: 'ok', result: JSON.parse(result) }));
+          } catch (e) {
+            console.error('Send error:', e);
+            res.writeHead(500);
+            res.end(JSON.stringify({ error: e.message }));
+          }
+        });
+        return;
+      }
+    }
+    
     res.writeHead(404);
-    res.end('Not found');
+    res.end(JSON.stringify({ error: 'Not found' }));
   } catch (e) {
     console.error('Error:', e);
     res.writeHead(500);
-    res.end('Error');
+    res.end(JSON.stringify({ error: e.message }));
   }
 });
 
@@ -245,4 +292,10 @@ function generateReply(message) {
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`SeaTalk Bot ready on port ${PORT}`);
+  console.log('Endpoints:');
+  console.log('  GET  /health - Health check');
+  console.log('  GET  /seatalk/callback - SeaTalk verification');
+  console.log('  POST /seatalk/callback - SeaTalk events');
+  console.log('  GET  /poll?last_id=X&timeout=5000 - OpenClaw long poll');
+  console.log('  POST /send - OpenClaw send reply');
 });
