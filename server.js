@@ -79,8 +79,8 @@ async function getAccessToken() {
   return new Promise((resolve, reject) => {
     const data = JSON.stringify({ app_id: APP_ID, app_secret: APP_SECRET });
     const options = {
-      hostname: 'open.seatalk.io',
-      path: '/authentication/v1/token/get',
+      hostname: 'openapi.seatalk.io',
+      path: '/auth/app_access_token',
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -93,10 +93,14 @@ async function getAccessToken() {
       res.on('data', chunk => body += chunk);
       res.on('end', () => {
         try {
+          console.log(`[seatalk] Token response: ${body.substring(0, 200)}`);
           const json = JSON.parse(body);
-          if (json.code === 0 && json.token) {
-            accessToken = json.token;
-            tokenExpiry = Date.now() + (json.expire_in || 7200) * 1000 - 60000;
+          // Support both v1 (code/token) and v2 (code/app_access_token) response formats
+          const tok = json.token || json.app_access_token;
+          const expiry = json.expire_in || json.expire || 7200;
+          if ((json.code === 0 || json.code === undefined) && tok) {
+            accessToken = tok;
+            tokenExpiry = Date.now() + expiry * 1000 - 60000;
             console.log('Got SeaTalk access token');
             resolve(accessToken);
           } else {
@@ -122,10 +126,12 @@ async function sendMessage(employeeCode, message) {
     message: { tag: 'text', text: { content: message } }
   });
 
+  console.log(`[seatalk] Sending to employee_code=${employeeCode}, payload=${data.substring(0, 200)}`);
+
   return new Promise((resolve, reject) => {
     const options = {
-      hostname: 'open.seatalk.io',
-      path: '/messaging/v1/send_message',
+      hostname: 'openapi.seatalk.io',
+      path: '/messaging/v2/single_chat',
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,
@@ -138,8 +144,12 @@ async function sendMessage(employeeCode, message) {
       let body = '';
       res.on('data', chunk => body += chunk);
       res.on('end', () => {
-        console.log('SeaTalk send result:', body);
-        resolve(body);
+        console.log(`[seatalk] Send result (${res.statusCode}): ${body.substring(0, 200)}`);
+        if (res.statusCode >= 400) {
+          reject(new Error(`SeaTalk API ${res.statusCode}: ${body.substring(0, 200)}`));
+        } else {
+          resolve(body);
+        }
       });
     });
 
@@ -178,29 +188,31 @@ function httpRequest(url, options, body) {
   });
 }
 
-// 通过 openclaw gateway API 发送消息并获取回复
+// 通过 openclaw wrapper console API 发送消息并获取回复
+const SETUP_PASSWORD = process.env.SETUP_PASSWORD || 'openclaw2026secure';
+
 async function askOpenClaw(userId, message) {
   if (!OPENCLAW_GATEWAY_URL) return null;
 
   const gatewayBase = OPENCLAW_GATEWAY_URL.replace(/\/$/, '');
-  const sessionId = userSessions.get(userId) || `seatalk-${userId}`;
 
   try {
-    // 使用 openclaw gateway 的 HTTP API 发送消息
     const payload = JSON.stringify({
-      message: message,
-      session_id: sessionId,
+      command: 'openclaw.agent.message',
+      arg: JSON.stringify({ agent: 'main', message: message }),
     });
 
-    console.log(`[bridge] Sending to openclaw: session=${sessionId}, message=${message.substring(0, 50)}...`);
+    const authHeader = 'Basic ' + Buffer.from(`user:${SETUP_PASSWORD}`).toString('base64');
+
+    console.log(`[bridge] Sending to openclaw: user=${userId}, message=${message.substring(0, 50)}...`);
 
     const response = await httpRequest(
-      `${gatewayBase}/api/v1/chat`,
+      `${gatewayBase}/setup/api/console/run`,
       {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${OPENCLAW_GATEWAY_TOKEN}`,
+          'Authorization': authHeader,
         },
       },
       payload
@@ -210,29 +222,11 @@ async function askOpenClaw(userId, message) {
 
     if (response.status === 200) {
       const result = JSON.parse(response.body);
-      // 保存会话 ID
-      if (result.session_id) {
-        userSessions.set(userId, result.session_id);
+      if (result.ok && result.output) {
+        return result.output.trim();
       }
-      return result.response || result.message || result.text || JSON.stringify(result);
-    }
-
-    // 尝试备用端点
-    const altResponse = await httpRequest(
-      `${gatewayBase}/api/message`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${OPENCLAW_GATEWAY_TOKEN}`,
-        },
-      },
-      payload
-    );
-
-    if (altResponse.status === 200) {
-      const result = JSON.parse(altResponse.body);
-      return result.response || result.message || result.text || JSON.stringify(result);
+      console.error(`[bridge] OpenClaw returned ok=false: ${result.output || result.error}`);
+      return null;
     }
 
     console.error(`[bridge] OpenClaw error: ${response.status} ${response.body.substring(0, 200)}`);
