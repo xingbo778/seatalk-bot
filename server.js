@@ -115,11 +115,11 @@ async function getAccessToken() {
 }
 
 // 发送 SeaTalk 消息
-async function sendMessage(userId, message) {
+async function sendMessage(employeeCode, message) {
   const token = await getAccessToken();
   const data = JSON.stringify({
-    recipient: { type: 'single', id: userId },
-    message: { text: message }
+    employee_code: employeeCode,
+    message: { tag: 'text', text: { content: message } }
   });
 
   return new Promise((resolve, reject) => {
@@ -333,18 +333,19 @@ const server = http.createServer((req, res) => {
 
             // 消息处理
             if (data.event_type === 'message_from_bot_subscriber') {
-              const senderId = data.event?.sender?.id;
-              const message = data.event?.message?.text || '';
+              const senderId = data.event?.seatalk_id;
+              const employeeCode = data.event?.employee_code;
+              const message = data.event?.message?.text?.content || '';
 
-              console.log(`Message from ${senderId}: ${message}`);
+              console.log(`Message from ${senderId} (emp:${employeeCode}): ${message}`);
 
               // 先返回 200 给 SeaTalk（避免超时重试）
               res.writeHead(200);
               res.end(JSON.stringify({ status: 'ok' }));
 
-              // Bridge mode: 异步转发到 openclaw
+              // Bridge mode: 异步转发到 openclaw (use employeeCode for sending replies)
               if (OPENCLAW_GATEWAY_URL) {
-                handleSeaTalkMessage(senderId, message).catch(err => {
+                handleSeaTalkMessage(employeeCode, message).catch(err => {
                   console.error('[bridge] handleSeaTalkMessage error:', err);
                 });
               } else {
