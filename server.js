@@ -161,11 +161,21 @@ async function getAccessToken(bot) {
   });
 }
 
+async function setTypingStatus(bot, employeeCode) {
+  try {
+    const token = await getAccessToken(bot);
+    const data = JSON.stringify({ employee_code: employeeCode });
+    await seatalkPost(bot, token, '/messaging/v2/single_chat_typing', data);
+  } catch (e) {
+    console.log(`[${bot.id}] Typing status failed (non-critical): ${e.message}`);
+  }
+}
+
 async function sendMessage(bot, employeeCode, message) {
   const token = await getAccessToken(bot);
   const data = JSON.stringify({
     employee_code: employeeCode,
-    message: { tag: 'text', text: { content: message } },
+    message: { tag: 'text', text: { format: 1, content: message } },
   });
   return seatalkPost(bot, token, '/messaging/v2/single_chat', data);
 }
@@ -174,7 +184,7 @@ async function sendGroupMessage(bot, groupId, message) {
   const token = await getAccessToken(bot);
   const data = JSON.stringify({
     group_id: groupId,
-    message: { tag: 'text', text: { content: message } },
+    message: { tag: 'text', text: { format: 1, content: message } },
   });
   return seatalkPost(bot, token, '/messaging/v2/group_chat', data);
 }
@@ -246,6 +256,10 @@ async function askOpenClaw(bot, userId, message) {
 }
 
 async function handleMessage(bot, employeeCode, message, groupChatId) {
+  // Show "Typing..." in private chat while waiting for OpenClaw response
+  if (!groupChatId) {
+    setTypingStatus(bot, employeeCode);
+  }
   const reply = await askOpenClaw(bot, employeeCode, message);
   const sendFn = groupChatId
     ? (msg) => sendGroupMessage(bot, groupChatId, msg)
