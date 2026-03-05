@@ -217,7 +217,11 @@ async function askOpenClaw(bot, userId, message) {
 
     if (response.status === 200) {
       const result = JSON.parse(response.body);
-      if (result.ok && result.output) return result.output.trim();
+      if (result.ok && result.output) {
+        // Strip gateway warning lines that precede the actual response
+        const cleaned = result.output.replace(/^(gateway connect failed:.*\n|Gateway agent failed;.*\n|Gateway target:.*\n|Source:.*\n|Config:.*\n|Bind:.*\n)*/gm, '').trim();
+        return cleaned;
+      }
       console.error(`[${bot.id}] OpenClaw ok=false: ${result.output || result.error}`);
     } else {
       console.error(`[${bot.id}] OpenClaw error: ${response.status} ${response.body.substring(0, 200)}`);
