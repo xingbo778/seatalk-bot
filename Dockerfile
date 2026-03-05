@@ -6,13 +6,13 @@ RUN apk add --no-cache curl
 WORKDIR /app
 
 COPY package.json ./
-RUN npm install --production || true
+RUN npm install --production
 
 COPY server.js ./
 
-EXPOSE 3000
+EXPOSE 8080
 
 HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=3 \
-  CMD curl -f http://localhost:3000/health || exit 1
+  CMD curl -f http://localhost:8080/health || exit 1
 
 CMD ["node", "server.js"]
