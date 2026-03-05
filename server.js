@@ -170,10 +170,10 @@ async function sendMessage(bot, employeeCode, message) {
   return seatalkPost(bot, token, '/messaging/v2/single_chat', data);
 }
 
-async function sendGroupMessage(bot, groupChatId, message) {
+async function sendGroupMessage(bot, groupId, message) {
   const token = await getAccessToken(bot);
   const data = JSON.stringify({
-    group_chat_id: groupChatId,
+    group_id: groupId,
     message: { tag: 'text', text: { content: message } },
   });
   return seatalkPost(bot, token, '/messaging/v2/group_chat', data);
@@ -307,22 +307,31 @@ async function handleCallback(bot, req, res, body) {
     }
 
     // Group chat @mention
-    if (data.event_type === 'new_mentioned_message_from_group_chat') {
-      const seatalkId = data.event?.seatalk_id;
-      const employeeCode = data.event?.employee_code;
-      const groupChatId = data.event?.group_chat_id;
-      const message = data.event?.message?.text?.content || '';
+    if (data.event_type === 'new_mentioned_message_received_from_group_chat') {
+      const groupId = data.event?.group_id;
+      const sender = data.event?.message?.sender;
+      const seatalkId = sender?.seatalk_id;
+      const employeeCode = sender?.employee_code;
+      const plainText = data.event?.message?.text?.plain_text || '';
 
-      // Strip @mention prefix (e.g., "@BotName " ) from the message
-      const cleanMessage = message.replace(/^@\S+\s*/, '').trim() || message;
+      // Strip all @mentions from the message to get the actual question
+      const mentionedList = data.event?.message?.text?.mentioned_list || [];
+      let cleanMessage = plainText;
+      for (const m of mentionedList) {
+        if (m.username) {
+          cleanMessage = cleanMessage.replace(new RegExp(`@${m.username}\\s*`, 'g'), '');
+        }
+      }
+      // Also strip any remaining @mentions patterns
+      cleanMessage = cleanMessage.replace(/@\S+\s*/g, '').trim() || plainText.trim();
 
-      console.log(`[${bot.id}] Group ${groupChatId} from ${seatalkId} (emp:${employeeCode}): ${cleanMessage}`);
+      console.log(`[${bot.id}] Group ${groupId} from ${seatalkId} (emp:${employeeCode}): ${cleanMessage}`);
 
       res.writeHead(200);
       res.end(JSON.stringify({ status: 'ok' }));
 
       if (bot.openclaw_url && cleanMessage) {
-        handleMessage(bot, employeeCode, cleanMessage, groupChatId).catch(err => {
+        handleMessage(bot, employeeCode, cleanMessage, groupId).catch(err => {
           console.error(`[${bot.id}] handleMessage error:`, err);
         });
       }
