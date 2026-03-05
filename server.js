@@ -239,13 +239,6 @@ async function askOpenClaw(userId, message) {
 
 // 处理 SeaTalk 消息 (bridge mode)
 async function handleSeaTalkMessage(senderId, message) {
-  // 发送"正在思考"提示
-  try {
-    await sendMessage(senderId, '🤔 Thinking...');
-  } catch (e) {
-    console.warn('[bridge] Failed to send typing indicator:', e.message);
-  }
-
   const reply = await askOpenClaw(senderId, message);
 
   if (reply) {
