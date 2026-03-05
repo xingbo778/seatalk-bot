@@ -167,11 +167,23 @@ async function sendMessage(bot, employeeCode, message) {
     employee_code: employeeCode,
     message: { tag: 'text', text: { content: message } },
   });
+  return seatalkPost(bot, token, '/messaging/v2/single_chat', data);
+}
 
+async function sendGroupMessage(bot, groupChatId, message) {
+  const token = await getAccessToken(bot);
+  const data = JSON.stringify({
+    group_chat_id: groupChatId,
+    message: { tag: 'text', text: { content: message } },
+  });
+  return seatalkPost(bot, token, '/messaging/v2/group_chat', data);
+}
+
+function seatalkPost(bot, token, path, data) {
   return new Promise((resolve, reject) => {
     const req = https.request({
       hostname: 'openapi.seatalk.io',
-      path: '/messaging/v2/single_chat',
+      path,
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,
@@ -182,7 +194,7 @@ async function sendMessage(bot, employeeCode, message) {
       let body = '';
       res.on('data', chunk => body += chunk);
       res.on('end', () => {
-        console.log(`[${bot.id}] Send result (${res.statusCode}): ${body.substring(0, 200)}`);
+        console.log(`[${bot.id}] Send result (${res.statusCode}) ${path}: ${body.substring(0, 200)}`);
         res.statusCode >= 400 ? reject(new Error(`SeaTalk ${res.statusCode}: ${body.substring(0, 200)}`)) : resolve(body);
       });
     });
@@ -233,14 +245,17 @@ async function askOpenClaw(bot, userId, message) {
   }
 }
 
-async function handleMessage(bot, employeeCode, message) {
+async function handleMessage(bot, employeeCode, message, groupChatId) {
   const reply = await askOpenClaw(bot, employeeCode, message);
+  const sendFn = groupChatId
+    ? (msg) => sendGroupMessage(bot, groupChatId, msg)
+    : (msg) => sendMessage(bot, employeeCode, msg);
   try {
     if (reply) {
-      await sendMessage(bot, employeeCode, reply);
-      console.log(`[${bot.id}] Reply sent to ${employeeCode}: ${reply.substring(0, 100)}...`);
+      await sendFn(reply);
+      console.log(`[${bot.id}] Reply sent ${groupChatId ? 'to group ' + groupChatId : 'to ' + employeeCode}: ${reply.substring(0, 100)}...`);
     } else {
-      await sendMessage(bot, employeeCode, 'Sorry, I could not get a response. Please try again later.');
+      await sendFn('Sorry, I could not get a response. Please try again later.');
     }
   } catch (e) {
     console.error(`[${bot.id}] Failed to send reply: ${e.message}`);
@@ -267,15 +282,14 @@ async function handleCallback(bot, req, res, body) {
       return res.end(JSON.stringify({ error: 'Invalid signature' }));
     }
 
-    // Message
+    // Private message
     if (data.event_type === 'message_from_bot_subscriber') {
       const seatalkId = data.event?.seatalk_id;
       const employeeCode = data.event?.employee_code;
       const message = data.event?.message?.text?.content || '';
 
-      console.log(`[${bot.id}] Message from ${seatalkId} (emp:${employeeCode}): ${message}`);
+      console.log(`[${bot.id}] DM from ${seatalkId} (emp:${employeeCode}): ${message}`);
 
-      // Return 200 immediately to avoid SeaTalk retry
       res.writeHead(200);
       res.end(JSON.stringify({ status: 'ok' }));
 
@@ -284,11 +298,33 @@ async function handleCallback(bot, req, res, body) {
           console.error(`[${bot.id}] handleMessage error:`, err);
         });
       } else {
-        // Queue mode
         const state = botState.get(bot.id);
         const messageId = ++state.lastMessageId;
         state.messageQueue.push({ id: messageId, sender_id: seatalkId, employee_code: employeeCode, message, timestamp: Date.now() });
         if (state.messageQueue.length > 100) state.messageQueue.shift();
+      }
+      return;
+    }
+
+    // Group chat @mention
+    if (data.event_type === 'new_mentioned_message_from_group_chat') {
+      const seatalkId = data.event?.seatalk_id;
+      const employeeCode = data.event?.employee_code;
+      const groupChatId = data.event?.group_chat_id;
+      const message = data.event?.message?.text?.content || '';
+
+      // Strip @mention prefix (e.g., "@BotName " ) from the message
+      const cleanMessage = message.replace(/^@\S+\s*/, '').trim() || message;
+
+      console.log(`[${bot.id}] Group ${groupChatId} from ${seatalkId} (emp:${employeeCode}): ${cleanMessage}`);
+
+      res.writeHead(200);
+      res.end(JSON.stringify({ status: 'ok' }));
+
+      if (bot.openclaw_url && cleanMessage) {
+        handleMessage(bot, employeeCode, cleanMessage, groupChatId).catch(err => {
+          console.error(`[${bot.id}] handleMessage error:`, err);
+        });
       }
       return;
     }
