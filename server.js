@@ -190,7 +190,7 @@ async function sendGroupMessage(bot, groupId, message) {
   return seatalkPost(bot, token, '/messaging/v2/group_chat', data);
 }
 
-function seatalkPost(bot, token, path, data) {
+function seatalkPostRaw(token, path, data) {
   return new Promise((resolve, reject) => {
     const req = https.request({
       hostname: 'openapi.seatalk.io',
@@ -204,15 +204,34 @@ function seatalkPost(bot, token, path, data) {
     }, (res) => {
       let body = '';
       res.on('data', chunk => body += chunk);
-      res.on('end', () => {
-        console.log(`[${bot.id}] Send result (${res.statusCode}) ${path}: ${body.substring(0, 200)}`);
-        res.statusCode >= 400 ? reject(new Error(`SeaTalk ${res.statusCode}: ${body.substring(0, 200)}`)) : resolve(body);
-      });
+      res.on('end', () => resolve({ status: res.statusCode, body }));
     });
     req.on('error', reject);
     req.write(data);
     req.end();
   });
+}
+
+async function seatalkPost(bot, token, path, data) {
+  let res = await seatalkPostRaw(token, path, data);
+  console.log(`[${bot.id}] Send result (${res.status}) ${path}: ${res.body.substring(0, 200)}`);
+
+  // If token expired, invalidate cache and retry once with a fresh token
+  try {
+    const json = JSON.parse(res.body);
+    if (json.code === 100) {
+      console.log(`[${bot.id}] Token expired, refreshing...`);
+      const state = botState.get(bot.id);
+      state.accessToken = null;
+      state.tokenExpiry = 0;
+      const newToken = await getAccessToken(bot);
+      res = await seatalkPostRaw(newToken, path, data);
+      console.log(`[${bot.id}] Retry result (${res.status}) ${path}: ${res.body.substring(0, 200)}`);
+    }
+  } catch (e) { /* ignore parse errors */ }
+
+  if (res.status >= 400) throw new Error(`SeaTalk ${res.status}: ${res.body.substring(0, 200)}`);
+  return res.body;
 }
 
 // ========== OpenClaw bridge ==========
