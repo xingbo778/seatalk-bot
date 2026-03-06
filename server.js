@@ -368,7 +368,7 @@ async function askOpenClaw(bot, userId, message) {
 
     const response = await httpRequest(
       `${gatewayBase}/setup/api/console/run`,
-      { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': authHeader }, timeout: 60000 },
+      { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': authHeader }, timeout: 600000 },
       payload
     );
 
