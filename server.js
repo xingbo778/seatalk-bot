@@ -182,12 +182,16 @@ async function sendMessage(bot, employeeCode, message) {
   return seatalkPost(bot, token, '/messaging/v2/single_chat', data);
 }
 
-async function sendGroupMessage(bot, groupId, message) {
+async function sendGroupMessage(bot, groupId, message, mentionEmployeeCode) {
   const token = await getAccessToken(bot);
-  const data = JSON.stringify({
+  const payload = {
     group_id: groupId,
     message: { tag: 'text', text: { format: 1, content: message } },
-  });
+  };
+  if (mentionEmployeeCode) {
+    payload.mentioned_employee_codes = [mentionEmployeeCode];
+  }
+  const data = JSON.stringify(payload);
   return seatalkPost(bot, token, '/messaging/v2/group_chat', data);
 }
 
@@ -365,7 +369,7 @@ async function handleMessage(bot, employeeCode, message, groupChatId) {
     ? await askADK(bot, employeeCode, message)
     : await askOpenClaw(bot, employeeCode, message);
   const sendFn = groupChatId
-    ? (msg) => sendGroupMessage(bot, groupChatId, msg)
+    ? (msg) => sendGroupMessage(bot, groupChatId, msg, employeeCode)
     : (msg) => sendMessage(bot, employeeCode, msg);
   try {
     if (reply) {
