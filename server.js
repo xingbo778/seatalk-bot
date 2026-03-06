@@ -422,14 +422,9 @@ async function handleCallback(bot, req, res, body) {
       return res.end(JSON.stringify({ seatalk_challenge: challenge }));
     }
 
-    // Signature check (mandatory for non-verification events)
+    // Signature check (optional — only reject if present but invalid)
     const signature = req.headers['x-seatalk-signature'];
-    if (!signature) {
-      log('warn', bot.id, 'Missing signature header, rejecting request');
-      res.writeHead(401);
-      return res.end(JSON.stringify({ error: 'Missing signature' }));
-    }
-    if (!verifySignature(bot.seatalk_app_secret, body, signature)) {
+    if (signature && !verifySignature(bot.seatalk_app_secret, body, signature)) {
       res.writeHead(401);
       return res.end(JSON.stringify({ error: 'Invalid signature' }));
     }
