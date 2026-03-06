@@ -81,6 +81,9 @@ for (const bot of BOTS) {
   const target = bot.adk_url || bot.openclaw_url || '(passive)';
   console.log(`  [${bot.id}] ${mode} -> ${target}`);
   console.log(`    callback: /bot/${bot.id}/callback  (also auto-routed by app_id)`);
+  if (!bot.openclaw_api_key && !bot.openclaw_url && !bot.adk_url) {
+    console.warn(`  ⚠ [${bot.id}] OPENCLAW_API_KEY not set — /poll and /send endpoints are unauthenticated`);
+  }
 }
 
 // ========== Logging ==========
