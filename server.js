@@ -115,7 +115,10 @@ function escapeRegex(s) {
 function verifySignature(secret, body, signature) {
   if (!signature) return false;
   const expected = crypto.createHmac('sha256', secret).update(body).digest('hex');
-  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+  const sigBuf = Buffer.from(signature);
+  const expBuf = Buffer.from(expected);
+  if (sigBuf.length !== expBuf.length) return false;
+  return crypto.timingSafeEqual(sigBuf, expBuf);
 }
 
 function httpRequest(url, options, body) {
