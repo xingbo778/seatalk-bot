@@ -76,8 +76,9 @@ for (const bot of BOTS) {
 console.log(`SeaTalk Bot starting on port ${PORT}...`);
 console.log(`Configured ${BOTS.length} bot(s):`);
 for (const bot of BOTS) {
-  const mode = bot.openclaw_url ? 'BRIDGE' : 'QUEUE';
-  console.log(`  [${bot.id}] ${mode} → ${bot.openclaw_url || '(passive)'}`);
+  const mode = bot.adk_url ? 'ADK' : bot.openclaw_url ? 'BRIDGE' : 'QUEUE';
+  const target = bot.adk_url || bot.openclaw_url || '(passive)';
+  console.log(`  [${bot.id}] ${mode} -> ${target}`);
   console.log(`    callback: /bot/${bot.id}/callback  (also auto-routed by app_id)`);
 }
 
@@ -234,6 +235,89 @@ async function seatalkPost(bot, token, path, data) {
   return res.body;
 }
 
+// ========== ADK (Agent Development Kit) bridge ==========
+
+// Per-bot session cache: botId -> Map<userId, sessionId>
+const adkSessions = new Map();
+
+async function askADK(bot, userId, message) {
+  if (!bot.adk_url) return null;
+  const baseUrl = bot.adk_url.replace(/\/$/, '');
+  const appName = bot.adk_app_name || 'fortune_agent';
+
+  try {
+    // Get or create session for this user
+    let sessions = adkSessions.get(bot.id);
+    if (!sessions) { sessions = new Map(); adkSessions.set(bot.id, sessions); }
+
+    let sessionId = sessions.get(userId);
+    if (!sessionId) {
+      // Create a new session
+      const createRes = await httpRequest(
+        `${baseUrl}/apps/${appName}/users/${userId}/sessions`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' } },
+        '{}'
+      );
+      if (createRes.status === 200) {
+        const session = JSON.parse(createRes.body);
+        sessionId = session.id;
+        sessions.set(userId, sessionId);
+        console.log(`[${bot.id}] Created ADK session ${sessionId} for user ${userId}`);
+      } else {
+        console.error(`[${bot.id}] Failed to create ADK session: ${createRes.status} ${createRes.body.substring(0, 200)}`);
+        return null;
+      }
+    }
+
+    // Send message to agent
+    console.log(`[${bot.id}] Sending to ADK: user=${userId}, session=${sessionId}, message=${message.substring(0, 50)}...`);
+    const payload = JSON.stringify({
+      app_name: appName,
+      user_id: userId,
+      session_id: sessionId,
+      new_message: {
+        role: 'user',
+        parts: [{ text: message }],
+      },
+    });
+
+    const response = await httpRequest(
+      `${baseUrl}/run`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' } },
+      payload
+    );
+
+    console.log(`[${bot.id}] ADK response status: ${response.status}`);
+
+    if (response.status === 200) {
+      const events = JSON.parse(response.body);
+      // Extract the last model text response
+      const textParts = [];
+      for (const event of events) {
+        if (event.author === appName && event.content?.parts) {
+          for (const part of event.content.parts) {
+            if (part.text) textParts.push(part.text);
+          }
+        }
+      }
+      const result = textParts.join('\n').trim();
+      if (result) return result;
+      console.error(`[${bot.id}] ADK returned no text in response`);
+    } else if (response.status === 404) {
+      // Session might have expired, clear and retry once
+      console.log(`[${bot.id}] Session expired, creating new session...`);
+      sessions.delete(userId);
+      return askADK(bot, userId, message);
+    } else {
+      console.error(`[${bot.id}] ADK error: ${response.status} ${response.body.substring(0, 200)}`);
+    }
+    return null;
+  } catch (err) {
+    console.error(`[${bot.id}] ADK request failed: ${err.message}`);
+    return null;
+  }
+}
+
 // ========== OpenClaw bridge ==========
 
 async function askOpenClaw(bot, userId, message) {
@@ -276,9 +360,10 @@ async function askOpenClaw(bot, userId, message) {
 }
 
 async function handleMessage(bot, employeeCode, message, groupChatId) {
-  // Show "Typing..." while waiting for OpenClaw response
   setTypingStatus(bot, employeeCode, groupChatId);
-  const reply = await askOpenClaw(bot, employeeCode, message);
+  const reply = bot.adk_url
+    ? await askADK(bot, employeeCode, message)
+    : await askOpenClaw(bot, employeeCode, message);
   const sendFn = groupChatId
     ? (msg) => sendGroupMessage(bot, groupChatId, msg)
     : (msg) => sendMessage(bot, employeeCode, msg);
@@ -325,7 +410,7 @@ async function handleCallback(bot, req, res, body) {
       res.writeHead(200);
       res.end(JSON.stringify({ status: 'ok' }));
 
-      if (bot.openclaw_url) {
+      if (bot.openclaw_url || bot.adk_url) {
         handleMessage(bot, employeeCode, message).catch(err => {
           console.error(`[${bot.id}] handleMessage error:`, err);
         });
@@ -362,7 +447,7 @@ async function handleCallback(bot, req, res, body) {
       res.writeHead(200);
       res.end(JSON.stringify({ status: 'ok' }));
 
-      if (bot.openclaw_url && cleanMessage) {
+      if ((bot.openclaw_url || bot.adk_url) && cleanMessage) {
         handleMessage(bot, employeeCode, cleanMessage, groupId).catch(err => {
           console.error(`[${bot.id}] handleMessage error:`, err);
         });
