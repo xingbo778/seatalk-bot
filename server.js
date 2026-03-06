@@ -359,35 +359,30 @@ async function askOpenClaw(bot, userId, message) {
   const authHeader = 'Basic ' + Buffer.from(`user:${bot.setup_password}`).toString('base64');
 
   try {
-    const payload = JSON.stringify({
-      command: 'openclaw.agent.message',
-      arg: JSON.stringify({ agent: 'main', message }),
-    });
+    const payload = JSON.stringify({ message });
 
-    console.log(`[${bot.id}] Sending to openclaw: user=${userId}, message=${message.substring(0, 50)}...`);
+    console.log(`[${bot.id}] Sending to claude-bot: user=${userId}, message=${message.substring(0, 50)}...`);
 
     const response = await httpRequest(
-      `${gatewayBase}/setup/api/console/run`,
+      `${gatewayBase}/setup/api/claude`,
       { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': authHeader }, timeout: 600000 },
       payload
     );
 
-    console.log(`[${bot.id}] OpenClaw response status: ${response.status}`);
+    console.log(`[${bot.id}] claude-bot response status: ${response.status}`);
 
     if (response.status === 200) {
       const result = JSON.parse(response.body);
       if (result.ok && result.output) {
-        // Strip gateway warning lines that precede the actual response
-        const cleaned = result.output.replace(/^(gateway connect failed:.*\n|Gateway agent failed;.*\n|Gateway target:.*\n|Source:.*\n|Config:.*\n|Bind:.*\n)*/gm, '').trim();
-        return cleaned;
+        return result.output.trim();
       }
-      console.error(`[${bot.id}] OpenClaw ok=false: ${result.output || result.error}`);
+      console.error(`[${bot.id}] claude-bot ok=false: ${result.output || result.error}`);
     } else {
-      console.error(`[${bot.id}] OpenClaw error: ${response.status} ${response.body.substring(0, 200)}`);
+      console.error(`[${bot.id}] claude-bot error: ${response.status} ${response.body.substring(0, 200)}`);
     }
     return null;
   } catch (err) {
-    console.error(`[${bot.id}] OpenClaw request failed: ${err.message}`);
+    console.error(`[${bot.id}] claude-bot request failed: ${err.message}`);
     return null;
   }
 }
