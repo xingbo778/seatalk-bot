@@ -392,23 +392,63 @@ async function askOpenClaw(bot, userId, message) {
   }
 }
 
+// Keywords that indicate a long-running background task
+const ASYNC_KEYWORDS = ['claude', 'claude-bot', 'claude code', '帮我', '分析', '优化', '生成', '实现', '开发', '重构', '修复'];
+
+function isLongRunningTask(message) {
+  const lower = message.toLowerCase();
+  return ASYNC_KEYWORDS.some(kw => lower.includes(kw.toLowerCase())) && message.length > 20;
+}
+
 async function handleMessage(bot, employeeCode, message, groupChatId) {
-  setTypingStatus(bot, employeeCode, groupChatId);
-  const reply = bot.adk_url
-    ? await askADK(bot, employeeCode, message)
-    : await askOpenClaw(bot, employeeCode, message);
   const sendFn = groupChatId
     ? (msg) => sendGroupMessage(bot, groupChatId, msg, employeeCode)
     : (msg) => sendMessage(bot, employeeCode, msg);
-  try {
-    if (reply) {
-      await sendFn(reply);
-      console.log(`[${bot.id}] Reply sent ${groupChatId ? 'to group ' + groupChatId : 'to ' + employeeCode}: ${reply.substring(0, 100)}...`);
-    } else {
-      await sendFn('Sorry, I could not get a response. Please try again later.');
+
+  const isAsync = !bot.adk_url && isLongRunningTask(message);
+
+  if (isAsync) {
+    // Send immediate ack, process in background
+    setTypingStatus(bot, employeeCode, groupChatId);
+    try {
+      await sendFn('⏳ 收到，后台处理中，完成后回复你...');
+    } catch (e) {
+      console.error(`[${bot.id}] Failed to send ack: ${e.message}`);
     }
-  } catch (e) {
-    console.error(`[${bot.id}] Failed to send reply: ${e.message}`);
+
+    // Fire and forget
+    askOpenClaw(bot, employeeCode, message).then(async (reply) => {
+      try {
+        if (reply) {
+          await sendFn(reply);
+          console.log(`[${bot.id}] Async reply sent to ${employeeCode}: ${reply.substring(0, 100)}...`);
+        } else {
+          await sendFn('❌ 任务执行失败，请重试。');
+        }
+      } catch (e) {
+        console.error(`[${bot.id}] Failed to send async reply: ${e.message}`);
+      }
+    }).catch(async (err) => {
+      console.error(`[${bot.id}] Async task error: ${err.message}`);
+      try { await sendFn(`❌ 出错了：${err.message}`); } catch (_) {}
+    });
+
+  } else {
+    // Short task: original synchronous flow
+    setTypingStatus(bot, employeeCode, groupChatId);
+    const reply = bot.adk_url
+      ? await askADK(bot, employeeCode, message)
+      : await askOpenClaw(bot, employeeCode, message);
+    try {
+      if (reply) {
+        await sendFn(reply);
+        console.log(`[${bot.id}] Reply sent ${groupChatId ? 'to group ' + groupChatId : 'to ' + employeeCode}: ${reply.substring(0, 100)}...`);
+      } else {
+        await sendFn('Sorry, I could not get a response. Please try again later.');
+      }
+    } catch (e) {
+      console.error(`[${bot.id}] Failed to send reply: ${e.message}`);
+    }
   }
 }
 
