@@ -4,6 +4,7 @@ const crypto = require('crypto');
 
 const PORT = process.env.PORT || 8080;
 const MAX_BODY_SIZE = 1024 * 1024;
+const MAX_MESSAGE_LENGTH = 5000;
 
 // ========== Multi-bot configuration ==========
 // BOTS env var: JSON array of bot configs, e.g.:
@@ -81,6 +82,14 @@ for (const bot of BOTS) {
   console.log(`    callback: /bot/${bot.id}/callback  (also auto-routed by app_id)`);
 }
 
+// ========== Logging ==========
+
+function log(level, botId, msg, extra) {
+  const entry = { ts: new Date().toISOString(), level, bot: botId, msg };
+  if (extra) entry.extra = extra;
+  console[level === 'error' ? 'error' : 'log'](JSON.stringify(entry));
+}
+
 // ========== Helpers ==========
 
 function readBody(req) {
@@ -93,6 +102,10 @@ function readBody(req) {
     req.on('end', () => resolve(body));
     req.on('error', reject);
   });
+}
+
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function verifySignature(secret, body, signature) {
@@ -116,7 +129,7 @@ function httpRequest(url, options, body) {
       res.on('data', chunk => data += chunk);
       res.on('end', () => resolve({ status: res.statusCode, body: data }));
     });
-    req.setTimeout(120000, () => { req.destroy(); reject(new Error('Request timeout')); });
+    req.setTimeout(options.timeout || 30000, () => { req.destroy(); reject(new Error('Request timeout')); });
     req.on('error', reject);
     if (body) req.write(body);
     req.end();
@@ -129,6 +142,16 @@ async function getAccessToken(bot) {
   const state = botState.get(bot.id);
   if (state.accessToken && Date.now() < state.tokenExpiry) return state.accessToken;
 
+  // Mutex: reuse in-flight refresh to avoid concurrent token requests
+  if (state._refreshPromise) return state._refreshPromise;
+
+  state._refreshPromise = _fetchAccessToken(bot, state).finally(() => {
+    state._refreshPromise = null;
+  });
+  return state._refreshPromise;
+}
+
+function _fetchAccessToken(bot, state) {
   return new Promise((resolve, reject) => {
     const data = JSON.stringify({ app_id: bot.seatalk_app_id, app_secret: bot.seatalk_app_secret });
     const req = https.request({
@@ -251,7 +274,7 @@ async function askOpenClaw(bot, userId, message) {
 
     const response = await httpRequest(
       `${gatewayBase}/setup/api/console/run`,
-      { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': authHeader } },
+      { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': authHeader }, timeout: 60000 },
       payload
     );
 
@@ -307,9 +330,14 @@ async function handleCallback(bot, req, res, body) {
       return res.end(JSON.stringify({ seatalk_challenge: challenge }));
     }
 
-    // Signature check
+    // Signature check (mandatory for non-verification events)
     const signature = req.headers['x-seatalk-signature'];
-    if (signature && !verifySignature(bot.seatalk_app_secret, body, signature)) {
+    if (!signature) {
+      log('warn', bot.id, 'Missing signature header, rejecting request');
+      res.writeHead(401);
+      return res.end(JSON.stringify({ error: 'Missing signature' }));
+    }
+    if (!verifySignature(bot.seatalk_app_secret, body, signature)) {
       res.writeHead(401);
       return res.end(JSON.stringify({ error: 'Invalid signature' }));
     }
@@ -318,9 +346,10 @@ async function handleCallback(bot, req, res, body) {
     if (data.event_type === 'message_from_bot_subscriber') {
       const seatalkId = data.event?.seatalk_id;
       const employeeCode = data.event?.employee_code;
-      const message = data.event?.message?.text?.content || '';
+      let message = data.event?.message?.text?.content || '';
+      if (message.length > MAX_MESSAGE_LENGTH) message = message.substring(0, MAX_MESSAGE_LENGTH);
 
-      console.log(`[${bot.id}] DM from ${seatalkId} (emp:${employeeCode}): ${message}`);
+      log('info', bot.id, 'DM received', { from: seatalkId, emp: employeeCode, preview: message.substring(0, 100) });
 
       res.writeHead(200);
       res.end(JSON.stringify({ status: 'ok' }));
@@ -351,13 +380,14 @@ async function handleCallback(bot, req, res, body) {
       let cleanMessage = plainText;
       for (const m of mentionedList) {
         if (m.username) {
-          cleanMessage = cleanMessage.replace(new RegExp(`@${m.username}\\s*`, 'g'), '');
+          cleanMessage = cleanMessage.replace(new RegExp(`@${escapeRegex(m.username)}\\s*`, 'g'), '');
         }
       }
       // Also strip any remaining @mentions patterns
       cleanMessage = cleanMessage.replace(/@\S+\s*/g, '').trim() || plainText.trim();
+      if (cleanMessage.length > MAX_MESSAGE_LENGTH) cleanMessage = cleanMessage.substring(0, MAX_MESSAGE_LENGTH);
 
-      console.log(`[${bot.id}] Group ${groupId} from ${seatalkId} (emp:${employeeCode}): ${cleanMessage}`);
+      log('info', bot.id, 'Group mention received', { group: groupId, from: seatalkId, emp: employeeCode, preview: cleanMessage.substring(0, 100) });
 
       res.writeHead(200);
       res.end(JSON.stringify({ status: 'ok' }));
@@ -373,7 +403,7 @@ async function handleCallback(bot, req, res, body) {
     res.writeHead(200);
     res.end(JSON.stringify({ status: 'ok' }));
   } catch (e) {
-    console.error(`[${bot.id}] Callback error:`, e);
+    log('error', bot.id, 'Callback error', { error: e.message });
     res.writeHead(200);
     res.end(JSON.stringify({ status: 'ok' }));
   }
@@ -494,6 +524,12 @@ const server = http.createServer((req, res) => {
     const botId = parsedUrl.searchParams.get('bot') || BOTS[0].id;
     const bot = BOTS.find(b => b.id === botId);
     if (!bot) { res.writeHead(404); return res.end(JSON.stringify({ error: 'Bot not found' })); }
+
+    const sendApiKey = bot.openclaw_api_key || '';
+    if (sendApiKey) {
+      const auth = req.headers['authorization'];
+      if (auth !== `Bearer ${sendApiKey}`) { res.writeHead(401); return res.end(JSON.stringify({ error: 'Unauthorized' })); }
+    }
 
     readBody(req).then(async (body) => {
       try {
